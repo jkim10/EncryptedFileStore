@@ -83,7 +83,7 @@ void decrypt_cbc(FILE *cipherText, BYTE *hPass, FILE *newFile, int fileSize, int
         free(decrypted);
     }
 }
-void appendHMAC(FILE *file, BYTE *hPass)
+BYTE *calculateHMAC(BYTE *cipherText, size_t cipherSize, BYTE *hPass)
 {
     BYTE *hMac = malloc(SHA256_BLOCK_SIZE);
     BYTE opad[32] = {0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c, 0x5c,
@@ -91,14 +91,9 @@ void appendHMAC(FILE *file, BYTE *hPass)
     BYTE ipad[32] = {0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36,
                      0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36};
     doXor(hPass, ipad, 32);
-    fseek(file, 0, SEEK_END);
-    size_t archiveSize = ftell(file);
-    rewind(file);
-    BYTE *text = malloc(archiveSize);
-    fread(text, 1, archiveSize, file);
-    BYTE *sndArg = malloc(32 + archiveSize);
+    BYTE *sndArg = malloc(32 + cipherSize);
     memcpy(sndArg, ipad, 32);
-    memcpy(sndArg + 32, text, archiveSize);
+    memcpy(sndArg + 32, cipherText, cipherSize);
     SHA256_CTX ctx;
     sha256_init(&ctx);
     sha256_update(&ctx, sndArg, (32 + SHA256_BLOCK_SIZE)); //H(K XOR ipad, text)
@@ -114,21 +109,52 @@ void appendHMAC(FILE *file, BYTE *hPass)
     sha256_init(&ctx);
     sha256_update(&ctx, concatenated, (32 + (SHA256_BLOCK_SIZE * 2)));
     sha256_final(&ctx, hMac);
-    fwrite(hMac, 1, 32, file);
-    free(hMac);
-    free(text);
     free(sndArg);
     free(fstArg);
+    return hMac;
 }
-
-void recalcHMAC(FILE *file, BYTE *hPass)
+void appendHMAC(FILE *file, BYTE *hPass)
 {
+    fseek(file, 0, SEEK_END);
+    size_t archiveSize = ftell(file);
+    rewind(file);
+    BYTE *text = malloc(archiveSize);
+    fread(text, 1, archiveSize, file);
+    BYTE hMac[32];
+    BYTE *calculatedHMAC = calculateHMAC(text, archiveSize, hPass);
+    memcpy(hMac, calculatedHMAC, 32);
+    fwrite(hMac, 1, 32, file);
+    free(text);
 }
 
-void authenticateHMAC(FILE *file, BYTE *hPass)
+void removeHMAC(FILE *file)
+{
+    fseeko(file, -32, SEEK_END);
+    off_t position = ftello(file);
+    ftruncate(fileno(file), position);
+}
+
+int authenticateHMAC(FILE *file, BYTE *hPass)
 {
     BYTE fileHMAC[32];
     fseek(file, -32, SEEK_END);
+    fread(fileHMAC, 32, 1, file);
+    long int startHMAC = ftell(file);
+    rewind(file);
+    BYTE *noHmac = malloc(startHMAC);
+    fread(noHmac, startHMAC, 1, file);
+    BYTE newHMAC[32];
+    BYTE *calculatedHMAC = calculateHMAC(noHmac, startHMAC, hPass);
+    memcpy(newHMAC, calculatedHMAC, 32);
+    int isEqual = memcmp(fileHMAC, newHMAC, 32);
+    if (isEqual == 0)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 BYTE *hashPassword(BYTE *password, int numberOfIterations)
@@ -145,14 +171,6 @@ BYTE *hashPassword(BYTE *password, int numberOfIterations)
         sha256_final(&ctx, buf);
     }
     return buf;
-}
-
-void print_hex(BYTE str[], int len)
-{
-    int idx;
-
-    for (idx = 0; idx < len; idx++)
-        printf("%02x", str[idx]);
 }
 
 int main(int argc, char *argv[])
@@ -225,20 +243,59 @@ int main(int argc, char *argv[])
     // Hash password
     BYTE *hPass = hashPassword(password, 10000);
 
+    //Check if archive exists
+    int createdArchive = 0;
+    FILE *readArchive = fopen(archiveName, "r");
+    if (readArchive)
+    {
+        if (!authenticateHMAC(readArchive, hPass))
+        {
+            printf("WRONG PASSWORD\n");
+            free(hPass);
+            return 0;
+        }
+        fclose(readArchive);
+    }
+    else
+    {
+        createdArchive = 1;
+    }
+
     // PASSWORD PROTECTED FUNCTIONS
     if (strcmp(argv[1], "add") == 0)
     {
-        int createdArchive = 0;
-        FILE *testarchive = fopen(archiveName, "r");
-        if (!testarchive)
-        {
-            createdArchive = 1;
-        }
-        fclose(testarchive);
+
         FILE *archive = fopen(archiveName, "ab+");
+        if (!createdArchive)
+        {
+            removeHMAC(archive);
+            rewind(archive);
+        }
         for (int i = firstFile; i < argc; i++)
         {
+
             char fileName[100];
+            char fileSizeStr[12];
+            char numBlocksStr[12];
+            int alreadyExists = 0;
+            while (fread(fileName, 100, 1, archive) > 0)
+            {
+                fread(fileSizeStr, 12, 1, archive);
+                fread(numBlocksStr, 12, 1, archive);
+                int offset = (atoi(numBlocksStr) * 16) + 1;
+                fseek(archive, offset, SEEK_CUR);
+                printf("test\n");
+                if (strcmp(argv[i], fileName) == 0)
+                {
+                    alreadyExists = 1;
+                }
+            }
+            if (alreadyExists)
+            {
+                printf("%s already exists. Skipping this file\n", argv[i]);
+                continue;
+            }
+            rewind(archive);
             memset(fileName, '\0', 100);
             if (strlen(argv[i]) > 100)
             {
@@ -255,8 +312,6 @@ int main(int argc, char *argv[])
                 fclose(tmp);
                 continue;
             }
-            char fileSizeStr[12];
-            char numBlocksStr[12];
             sprintf(fileSizeStr, "%011d", fileSize);
             sprintf(numBlocksStr, "%011d", numBlocks);
             fwrite(fileName, 100, 1, archive);
@@ -267,21 +322,16 @@ int main(int argc, char *argv[])
                 fputc(fgetc(tmp), archive);
             fclose(tmp);
         }
-        if (createdArchive)
-        {
-            appendHMAC(archive, hPass);
-        }
-        else
-        {
-            recalcHMAC(archive, hPass);
-        }
+        appendHMAC(archive, hPass);
         fclose(archive);
     }
     else if (strcmp(argv[1], "extract") == 0)
     {
-        FILE *archive = fopen(archiveName, "rb");
+        FILE *archive = fopen(archiveName, "ab+");
         if (archive)
         {
+            removeHMAC(archive);
+            rewind(archive);
             char fileName[100];
             char fileSizeStr[12];
             char numBlocksStr[12];
@@ -315,6 +365,7 @@ int main(int argc, char *argv[])
                 }
                 rewind(archive);
             }
+            appendHMAC(archive, hPass);
             fclose(archive);
         }
         else
@@ -327,13 +378,15 @@ int main(int argc, char *argv[])
         FILE *archive = fopen(archiveName, "ab+");
         if (archive)
         {
+            removeHMAC(archive);
+            rewind(archive);
             char fileName[100];
             char fileSizeStr[12];
             char numBlocksStr[12];
             for (int i = firstFile; i < argc; i++)
             {
                 int found = 0;
-                FILE *tp = fopen("TEST.ttt", "wb+");
+                FILE *tp = tmpfile();
                 while (fread(fileName, 100, 1, archive) > 0)
                 {
 
@@ -341,6 +394,7 @@ int main(int argc, char *argv[])
                     fread(numBlocksStr, 12, 1, archive);
                     int numBlocks = atoi(numBlocksStr);
                     int offset = (numBlocks * 16);
+                    printf("%s\n", fileName);
                     if (strcmp(fileName, argv[i]) == 0)
                     {
                         found = 1;
@@ -373,6 +427,7 @@ int main(int argc, char *argv[])
                 rewind(archive);
                 fclose(tp);
             }
+            appendHMAC(archive, hPass);
             fclose(archive);
         }
         else
