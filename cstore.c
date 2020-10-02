@@ -113,6 +113,43 @@ BYTE *calculateHMAC(BYTE *cipherText, size_t cipherSize, BYTE *hPass)
     free(fstArg);
     return hMac;
 }
+// Appends encrypted file with headers
+void appendFile(FILE *src, char *fn, size_t fileSize, int numBlocks, FILE *dest)
+{
+    BYTE fileName[100];
+    BYTE fileSizeStr[12];
+    BYTE numBlocksStr[12];
+    char ch;
+    fseek(dest, -1, SEEK_END);
+    rewind(src);
+    memset(fileName, '\0', 100);
+    memcpy(fileName, fn, strlen(fn));
+    memset(fileSizeStr, 0, 12);
+    memset(numBlocksStr, 0, 12);
+    char fileSizeStrCpy[13];
+    char numBlocksStrCpy[13];
+    sprintf(fileSizeStrCpy, "%012ld", fileSize);
+    sprintf(numBlocksStrCpy, "%012d", numBlocks);
+    memcpy(fileSizeStr, fileSizeStrCpy, 12);
+    memcpy(numBlocksStr, numBlocksStrCpy, 12);
+    fwrite(fileName, 100, 1, dest);
+    fwrite(fileSizeStr, 12, 1, dest);
+    fwrite(numBlocksStr, 12, 1, dest);
+    BYTE buff[16];
+    int read = 0;
+    int written = 0;
+    while ((read = fread(buff, 16, 1, src) > 0))
+    {
+        written = fwrite(buff, 1, read, dest);
+        printf("WRITTEN: %d || READ: %d\n", read, written);
+    }
+    // while ((ch = fgetc(src)) != EOF)
+    // {
+    //     printf("%s:%d\n", fn, ftell(src));
+    //     fputc(ch, dest);
+    // }
+}
+
 void appendHMAC(FILE *file, BYTE *hPass)
 {
     fseek(file, 0, SEEK_END);
@@ -123,8 +160,14 @@ void appendHMAC(FILE *file, BYTE *hPass)
     BYTE hMac[32];
     BYTE *calculatedHMAC = calculateHMAC(text, archiveSize, hPass);
     memcpy(hMac, calculatedHMAC, 32);
-    fwrite(hMac, 1, 32, file);
-    free(text);
+    FILE *tmp = tmpfile();
+    fwrite(hMac, 32, 1, tmp);
+    char name[100];
+    memset(name, '\0', 100);
+    memcpy(name, "hMac", 4);
+    rewind(tmp);
+    appendFile(tmp, name, 32, 2, file);
+    fclose(tmp);
 }
 
 void removeHMAC(FILE *file)
@@ -244,7 +287,7 @@ int main(int argc, char *argv[])
     BYTE *hPass = hashPassword(password, 10000);
 
     //Check if archive exists
-    int createdArchive = 0;
+    int archiveExists = 1;
     FILE *readArchive = fopen(archiveName, "r");
     if (readArchive)
     {
@@ -258,7 +301,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-        createdArchive = 1;
+        archiveExists = 0;
     }
 
     // PASSWORD PROTECTED FUNCTIONS
@@ -266,7 +309,7 @@ int main(int argc, char *argv[])
     {
 
         FILE *archive = fopen(archiveName, "ab+");
-        if (!createdArchive)
+        if (archiveExists)
         {
             removeHMAC(archive);
             rewind(archive);
@@ -275,16 +318,14 @@ int main(int argc, char *argv[])
         {
 
             char fileName[100];
-            char fileSizeStr[12];
             char numBlocksStr[12];
             int alreadyExists = 0;
+            //Check if file already exists
             while (fread(fileName, 100, 1, archive) > 0)
             {
-                fread(fileSizeStr, 12, 1, archive);
-                fread(numBlocksStr, 12, 1, archive);
+                fseek(archive, 24, SEEK_END);
                 int offset = (atoi(numBlocksStr) * 16) + 1;
                 fseek(archive, offset, SEEK_CUR);
-                printf("test\n");
                 if (strcmp(argv[i], fileName) == 0)
                 {
                     alreadyExists = 1;
@@ -303,23 +344,15 @@ int main(int argc, char *argv[])
                 continue;
             }
             memcpy(fileName, argv[i], strlen(argv[i]));
-            FILE *tmp = tmpfile();
+            FILE *tmp = fopen("TEST4.ttt", "wb+");
             int fileSize = encrypt_cbc(fileName, tmp, hPass);
-            int numBlocks = ftell(tmp) / 16;
             if (fileSize > 999999999999)
             {
                 printf("File is too big for archiving. %s will be skipped\n", fileName);
-                fclose(tmp);
                 continue;
             }
-            sprintf(fileSizeStr, "%011d", fileSize);
-            sprintf(numBlocksStr, "%011d", numBlocks);
-            fwrite(fileName, 100, 1, archive);
-            fwrite(fileSizeStr, 12, 1, archive);
-            fwrite(numBlocksStr, 12, 1, archive);
-            rewind(tmp);
-            while (!feof(tmp))
-                fputc(fgetc(tmp), archive);
+            long int numBlocks = ftell(tmp) / 16;
+            appendFile(tmp, fileName, fileSize, numBlocks, archive);
             fclose(tmp);
         }
         appendHMAC(archive, hPass);
