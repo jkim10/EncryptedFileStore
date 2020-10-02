@@ -11,3 +11,9 @@ $(TARGET): $(OBJFILES)
 
 clean:
 	rm -f $(OBJFILES) $(TARGET) *.tar *~
+
+test:
+	make clean
+	make
+	./cstore add -p test newarchive.tar alice.txt bob.txt
+	./cstore extract -p test newarchive.tar alice.txt
