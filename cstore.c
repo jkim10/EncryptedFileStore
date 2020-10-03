@@ -348,7 +348,6 @@ int main(int argc, char *argv[])
 
             char fileName[100];
             char *givenFileName = getFileName(argv[i]);
-            printf("%s\n", givenFileName);
             char numBlocksStr[12];
             int alreadyExists = 0;
             while (fread(fileName, 100, 1, archive) > 0)
